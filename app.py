@@ -33,12 +33,12 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             evaluator TEXT NOT NULL,
             dept TEXT,
-            position TEXT,
+            position TEXT NOT NULL,
             customer_role TEXT,
-            indicator TEXT,
-            score INTEGER,
+            indicator TEXT NOT NULL,
+            score REAL,
             comment TEXT,
-            submitted_at TEXT,
+            submitted_at TEXT NOT NULL,  # 确保是TEXT类型，而非DATETIME（避免时区解析）
             UNIQUE(evaluator, position, indicator)
         )
     ''')
