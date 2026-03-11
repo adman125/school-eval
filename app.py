@@ -1,7 +1,12 @@
-from flask import Flask, request, jsonify, send_from_directory, make_response
-import json, os, sqlite3, datetime
+from flask import Flask, request, jsonify, send_from_directory, make_response, Response
+import os, sqlite3, datetime
 
-app = Flask(__name__, static_folder='static')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, 'static')
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+DB_PATH = os.path.join(DATA_DIR, 'eval.db')
+
+app = Flask(__name__, static_folder=STATIC_DIR, static_url_path='/static')
 
 @app.after_request
 def add_cors(response):
@@ -15,10 +20,8 @@ def handle_options():
     if request.method == 'OPTIONS':
         return make_response('', 204)
 
-DB_PATH = os.environ.get('DB_PATH', 'data/eval.db')
-
 def get_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -44,16 +47,14 @@ def init_db():
 
 init_db()
 
-# ── 静态页面 ──────────────────────────────────────
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    return send_from_directory(STATIC_DIR, 'index.html')
 
 @app.route('/admin')
 def admin():
-    return send_from_directory('static', 'admin.html')
+    return send_from_directory(STATIC_DIR, 'admin.html')
 
-# ── API ──────────────────────────────────────────
 @app.route('/api/submit', methods=['POST'])
 def submit():
     data = request.json
@@ -87,12 +88,8 @@ def stats():
     total_rows = conn.execute("SELECT COUNT(*) as n FROM submissions WHERE score IS NOT NULL").fetchone()['n']
     avg = conn.execute("SELECT AVG(score) as a FROM submissions WHERE score IS NOT NULL").fetchone()['a']
     conn.close()
-    return jsonify({
-        'submitted': submitted,
-        'total_rows': total_rows,
-        'avg': round(avg, 2) if avg else None,
-        'total_evaluators': 469
-    })
+    return jsonify({'submitted': submitted, 'total_rows': total_rows,
+                    'avg': round(avg, 2) if avg else None, 'total_evaluators': 469})
 
 @app.route('/api/who_submitted')
 def who_submitted():
@@ -107,40 +104,35 @@ def detail():
     pos = request.args.get('position', '')
     score = request.args.get('score', '')
     dept = request.args.get('dept', '')
-    limit = int(request.args.get('limit', 1000))
+    limit = int(request.args.get('limit', 100))
     offset = int(request.args.get('offset', 0))
-
     sql = "SELECT * FROM submissions WHERE 1=1"
     params = []
-    if ev:   sql += " AND evaluator LIKE ?"; params.append(f'%{ev}%')
-    if pos:  sql += " AND position LIKE ?";  params.append(f'%{pos}%')
-    if score: sql += " AND score=?";         params.append(int(score))
-    if dept: sql += " AND dept LIKE ?";      params.append(f'%{dept}%')
+    if ev:    sql += " AND evaluator LIKE ?";  params.append(f'%{ev}%')
+    if pos:   sql += " AND position LIKE ?";   params.append(f'%{pos}%')
+    if score: sql += " AND score=?";           params.append(int(score))
+    if dept:  sql += " AND dept LIKE ?";       params.append(f'%{dept}%')
     sql += " ORDER BY submitted_at DESC LIMIT ? OFFSET ?"
     params += [limit, offset]
-
     conn = get_db()
     rows = conn.execute(sql, params).fetchall()
-    total = conn.execute("SELECT COUNT(*) as n FROM submissions WHERE 1=1" +
-        (" AND evaluator LIKE ?" if ev else "") +
-        (" AND position LIKE ?" if pos else "") +
-        (" AND score=?" if score else "") +
-        (" AND dept LIKE ?" if dept else ""),
-        [p for p in params[:-2]]).fetchone()['n']
+    csql = "SELECT COUNT(*) as n FROM submissions WHERE 1=1"
+    cp = []
+    if ev:    csql += " AND evaluator LIKE ?";  cp.append(f'%{ev}%')
+    if pos:   csql += " AND position LIKE ?";   cp.append(f'%{pos}%')
+    if score: csql += " AND score=?";           cp.append(int(score))
+    if dept:  csql += " AND dept LIKE ?";       cp.append(f'%{dept}%')
+    total = conn.execute(csql, cp).fetchone()['n']
     conn.close()
     return jsonify({'total': total, 'rows': [dict(r) for r in rows]})
 
 @app.route('/api/by_position')
 def by_position():
     dept = request.args.get('dept', '')
-    pos = request.args.get('position', '')
-    sql = """
-        SELECT dept, position, customer_role, indicator,
-               COUNT(*) as cnt, AVG(score) as avg_score, MIN(score) as min_s, MAX(score) as max_s
-        FROM submissions WHERE score IS NOT NULL
-    """
+    pos  = request.args.get('position', '')
+    sql = "SELECT dept, position, customer_role, indicator, COUNT(*) as cnt, AVG(score) as avg_score FROM submissions WHERE score IS NOT NULL"
     params = []
-    if dept: sql += " AND dept LIKE ?"; params.append(f'%{dept}%')
+    if dept: sql += " AND dept LIKE ?";     params.append(f'%{dept}%')
     if pos:  sql += " AND position LIKE ?"; params.append(f'%{pos}%')
     sql += " GROUP BY dept, position, customer_role, indicator ORDER BY dept, position, avg_score"
     conn = get_db()
@@ -160,7 +152,6 @@ def export_csv():
             r['customer_role'] or '', (r['indicator'] or '').replace('\n',' ')[:80],
             str(r['score'] or ''), r['comment'] or '', r['submitted_at'] or ''
         ]))
-    from flask import Response
     return Response('\ufeff' + '\n'.join(lines),
         mimetype='text/tab-separated-values',
         headers={'Content-Disposition': 'attachment; filename=eval_export.txt'})
