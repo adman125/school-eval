@@ -3,6 +3,7 @@ import sqlite3
 import datetime
 import csv
 from io import StringIO
+from datetime import timezone, timedelta
 from flask import Flask, request, jsonify, send_from_directory, make_response, Response
 
 # 路径配置
@@ -13,7 +14,7 @@ DB_PATH = os.path.join(DATA_DIR, 'eval.db')
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path='/static')
 
-# CORS 跨域处理
+# 1. 跨域处理 (CORS)
 @app.after_request
 def add_cors(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -26,18 +27,17 @@ def handle_options():
     if request.method == 'OPTIONS':
         return make_response('', 204)
 
-# 数据库连接
+# 2. 数据库连接（增加 timeout 防止写入冲突）
 def get_db():
     os.makedirs(DATA_DIR, exist_ok=True)
-    # 增加 timeout 防止多用户同时写入时数据库锁定
     conn = sqlite3.connect(DB_PATH, timeout=20)
     conn.row_factory = sqlite3.Row
     return conn
 
-# 初始化数据库
+# 3. 初始化数据库
 def init_db():
     conn = get_db()
-    # 修复了原代码中 SQL 内部包含 # 注释导致的语法错误
+    # 删除了 SQL 内部的 Python 注释，避免执行报错
     conn.execute('''
         CREATE TABLE IF NOT EXISTS submissions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,14 +52,13 @@ def init_db():
             UNIQUE(evaluator, position, indicator)
         )
     ''')
-    # 增加索引提升查询性能
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_pos ON submissions(evaluator, position)")
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- 路由部分 ---
+# --- API 路由 ---
 
 @app.route('/')
 def index():
@@ -77,10 +76,15 @@ def submit():
     if not evaluator or not rows:
         return jsonify({'ok': False, 'msg': '数据为空'}), 400
     
-    now = datetime.datetime.now().isoformat()
+    # --- 关键修正：强制使用北京时间 (UTC+8) ---
+    tz_beijing = timezone(timedelta(hours=8))
+    # 使用 strftime 格式化为更易读的 2024-03-11 18:35:01 格式
+    now_str = datetime.datetime.now(tz_beijing).strftime('%Y-%m-%d %H:%M:%S')
+    
     conn = get_db()
     try:
         for r in rows:
+            # Upsert 逻辑：如果数据已存在，则更新分数、评语和时间
             conn.execute('''
                 INSERT INTO submissions
                     (evaluator, dept, position, customer_role, indicator, score, comment, submitted_at)
@@ -92,7 +96,7 @@ def submit():
                     submitted_at=excluded.submitted_at
             ''', (evaluator, r.get('dept',''), r.get('position',''), r.get('role',''),
                   r.get('indicator',''), r.get('score') if r.get('score') is not None else None, 
-                  r.get('comment',''), now))
+                  r.get('comment',''), now_str))
         conn.commit()
         return jsonify({'ok': True, 'saved': len(rows)})
     except Exception as e:
@@ -150,7 +154,6 @@ def detail():
     conn = get_db()
     rows = conn.execute(sql, params).fetchall()
     
-    # 获取总数用于分页
     csql = "SELECT COUNT(*) as n FROM submissions WHERE 1=1"
     cp = []
     if ev:    csql += " AND evaluator LIKE ?";  cp.append(f'%{ev}%')
@@ -187,10 +190,11 @@ def export_csv():
     rows = conn.execute("SELECT * FROM submissions ORDER BY submitted_at DESC").fetchall()
     conn.close()
 
-    # 使用 csv 模块处理，自动解决评论中包含引号、换行、制表符导致的格式乱行问题
+    # 4. 增强型 CSV 导出逻辑
     output = StringIO()
-    # 写入 UTF-8 BOM 头，确保 Excel 打开中文不乱码
+    # 写入 UTF-8 BOM 头，确保 Excel 直接双击打开不乱码
     output.write('\ufeff')
+    # 使用制表符作为分隔符，这是 Excel 最兼容的导出方式之一
     writer = csv.writer(output, delimiter='\t')
     
     writer.writerow(['评价人', '部门', '被评岗位', '评价者角色', '评价指标', '评分', '评语', '提交时间'])
@@ -200,17 +204,18 @@ def export_csv():
             r['dept'] or '', 
             r['position'] or '',
             r['customer_role'] or '', 
-            (r['indicator'] or '').replace('\n', ' '),
+            (r['indicator'] or '').replace('\n', ' '), # 去掉指标中的换行，防止 Excel 表格乱跳
             r['score'] if r['score'] is not None else '', 
-            (r['comment'] or '').replace('\n', ' '), 
+            (r['comment'] or '').replace('\n', ' '),   # 去掉评论中的换行
             r['submitted_at']
         ])
     
     response = Response(output.getvalue(), mimetype='text/tab-separated-values')
+    # 设置后缀为 .xls 或 .txt 均可，Excel 均可识别 TSV 格式
     response.headers['Content-Disposition'] = 'attachment; filename=eval_export.xls'
     return response
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    # 生产环境建议将 debug 设置为 False
+    # 生产模式建议将 debug 设置为 False
     app.run(host='0.0.0.0', port=port, debug=True)
